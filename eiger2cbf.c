@@ -2,36 +2,6 @@
 EIGER HDF5 to CBF converter
  Written by Takanori Nakane
 
-To build:
-
-Linux
-
-gcc -std=c99 -o eiger2cbf -g \
- -I$HOME/prog/dials/modules/cbflib/include \
- -L$HOME/prog/dials/build/lib -Ilz4 \
- eiger2cbf.c \
- lz4/lz4.c lz4/h5zlz4.c \
- bitshuffle/bshuf_h5filter.c \
- bitshuffle/bshuf_h5plugin.c \
- bitshuffle/bitshuffle.c \
- /usr/lib/x86_64-linux-gnu/libhdf5_hl.a \
- /usr/lib/x86_64-linux-gnu/libhdf5.a \
- -lcbf -lm -lpthread -lz -ldl
-
-Mac OS X
-
-gcc -std=c99 -o eiger2cbf -g \
- -ICBFlib-0.9.5.2/include -Ilz4 \
- eiger2cbf.c \
- lz4/lz4.c lz4/h5zlz4.c \
- bitshuffle/bshuf_h5filter.c \
- bitshuffle/bshuf_h5plugin.c \
- bitshuffle/bitshuffle.c \
- $HOME/local/lib/libhdf5_hl.a \
- $HOME/local/lib/libhdf5.a \
- CBFlib-0.9.5.2/lib/libcbf.a \
- -lm -lpthread -lz -ldl
-
 */
 
 #include "stdio.h"
@@ -54,8 +24,9 @@ int main(int argc, char **argv) {
   cbf_handle cbf;
   char header[4096] = {};
   int xpixels = -1, ypixels = -1, beamx = -1, beamy = -1, nimages = -1, depth = -1, countrate_cutoff = -1;
-  int from = -1, to = -1;
+  int from = -1, to = -1, slice = -1;
   int ret;
+  int element_size;
   double pixelsize = -1, wavelength = -1, distance = -1, count_time = -1, frame_time = -1, osc_width = -1, osc_start = -9999, thickness = -1;
   char detector_sn[256] = {}, description[256] = {}, version[256] = {};
 
@@ -70,7 +41,7 @@ int main(int argc, char **argv) {
     printf("  %s filename.h5           -- get number of frames\n", argv[0]);
     printf("  %s filename.h5 N out.cbf -- write N-th frame to out.cbf\n", argv[0]);
     printf("  %s filename.h5 N         -- write N-th frame to STDOUT\n", argv[0]);
-    printf("  %s filename.h5 N:M   out -- write N to M-th frames to outNNNNNN.cbf\n", argv[0]);
+    printf("  %s filename.h5 N:M:S out -- write N to M-th frames to outNNNNNN.cbf\n", argv[0]);
     printf("  N starts from 1. The file should be \"master\" h5.\n");
     return -1;
   }
@@ -90,7 +61,7 @@ int main(int argc, char **argv) {
     return 0;
   }
   
-  ret = sscanf(argv[2], "%d:%d", &from, &to);
+  ret = sscanf(argv[2], "%d:%d:%d", &from, &to, &slice);
   if (ret == 0) {
     fprintf(stderr, "Failed to parse output frame number(s).");
     return -1;\
@@ -101,7 +72,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "You cannot output multiple images into STDOUT.");
     return -1;
   }
-  fprintf(stderr, "Going to convert frame %d to %d.\n", from, to);  
+  fprintf(stderr, "Going to convert frame %d to %d, merging slice %d .\n", from, to, slice);  
   
   H5Eset_auto(0, NULL, NULL); // Comment out this line for debugging.
 
@@ -228,13 +199,9 @@ int main(int argc, char **argv) {
     fprintf(stderr, " WARNING: oscillation width was not defined. \"Start_angle\" field in the output is set to 0!\n");
     osc_width = 0;
   }
-  unsigned int *buf = (unsigned int*)malloc(sizeof(unsigned int) * xpixels * ypixels);
-  signed int *buf_signed = (signed int*)malloc(sizeof(signed int) * xpixels * ypixels);
+  
+  
   signed int *pixel_mask = (signed int*)malloc(sizeof(signed int) * xpixels * ypixels);
-  if (buf == NULL || buf_signed == NULL || pixel_mask == NULL) {
-    fprintf(stderr, "Failed to allocate image buffer.\n");
-    return -1;
-  }
 
   // TODO: Is it always in omega?
   int bufsize = (nimages < 100000) ? 100000 : nimages;
@@ -303,7 +270,11 @@ int main(int argc, char **argv) {
 
   fprintf(stderr, "\nFile analysis completed.\n\n");
   int frame;
-  for (frame = from; frame <= to; frame++) {
+  int inner_frame;
+  int inner_from;
+  int inner_to;
+  
+  for (frame = from; frame <= to; frame = frame + slice) {
     fprintf(stderr, "Converting frame %d (%d / %d)\n", frame, frame - from + 1, to - from + 1);
     if (angles[0] != -9999) {
       osc_start = angles[frame - 1];
@@ -318,81 +289,101 @@ int main(int argc, char **argv) {
       // Due to a firmware bug, nimages can be smaller than the actual value.
       // So we don't exit here
     }
-
+    inner_from = frame;
+    inner_to = frame + slice;
     char header_format[] = 
-      "\n"
-      "# Detector: %s, S/N %s\n"
-      "# Pixel_size %de-6 m x %de-6 m\n"
-      "# Silicon sensor, thickness %.6f m\n"
-      "# Exposure_time %f s\n"
-      "# Exposure_period %f s\n"
-      "# Count_cutoff %d counts\n"
-      "# Wavelength %f A\n"
-      "# Detector_distance %f m\n"
-      "# Beam_xy (%d, %d) pixels\n"
-      "# Start_angle %f deg.\n"
-      "# Angle_increment %f deg.\n";
-
+        "\n"
+        "# Detector: %s, S/N %s\n"
+        "# Pixel_size %de-6 m x %de-6 m\n"
+        "# Silicon sensor, thickness %.6f m\n"
+        "# Exposure_time %f s\n"
+        "# Exposure_period %f s\n"
+        "# Count_cutoff %d counts\n"
+        "# Wavelength %f A\n"
+        "# Detector_distance %f m\n"
+        "# Beam_xy (%d, %d) pixels\n"
+        "# Start_angle %f deg.\n"
+        "# Angle_increment %f deg.\n";
     char header_content[4096] = {};
     snprintf(header_content, 4096, header_format,
-	     description, detector_sn,
-	     thickness,
-	     (int)(pixelsize * 1E6), (int)(pixelsize * 1E6),
-	     count_time, frame_time, countrate_cutoff, wavelength, distance,
-	     beamx, beamy, osc_start, osc_width);
-
-
-    // Now open the required data
-
-    int block_number = block_start + (frame - 1) / number_per_block;
-    int frame_in_block = (frame - 1) % number_per_block;
-//    fprintf(stderr, " frame %d is in data_%06d frame %d (1-indexed).\n", 
-//            frame, block_number, frame_in_block + 1);
+    description, detector_sn,
+    thickness,
+    (int)(pixelsize * 1E6), (int)(pixelsize * 1E6),
+    count_time, frame_time, countrate_cutoff, wavelength, distance,
+    beamx, beamy, osc_start, osc_width*slice);
     
-    snprintf(data_name, 20, "data_%06d", block_number); 
-    data = H5Dopen2(group, data_name, H5P_DEFAULT);
-    dataspace = H5Dget_space(data);
-    if (data < 0) {
-      fprintf(stderr, "failed to open /entry/%s\n", data_name);
-      return -1;
-    }
-    if (H5Sget_simple_extent_ndims(dataspace) != 3) {
-      fprintf(stderr, "Dimension of /entry/%s is not 3!\n", data_name);
-      return -1;    
-    }
+    signed int *buf_signed = (signed int*)malloc(sizeof(signed int) * xpixels * ypixels);
+    
+    for (inner_frame = inner_from; inner_frame <= inner_to; inner_frame++) {
+      // Now open the required data
+       unsigned int *buf = (unsigned int*)malloc(sizeof(unsigned int) * xpixels * ypixels);
+       if (buf == NULL || buf_signed == NULL || pixel_mask == NULL) {
+        fprintf(stderr, "Failed to allocate image buffer.\n");
+        return -1;
+           }
+      int block_number = block_start + (inner_frame - 1) / number_per_block;
+      int frame_in_block = (inner_frame - 1) % number_per_block;
+  //    fprintf(stderr, " frame %d is in data_%06d frame %d (1-indexed).\n", 
+  //            frame, block_number, frame_in_block + 1);
+      
+      snprintf(data_name, 20, "data_%06d", block_number); 
+      data = H5Dopen2(group, data_name, H5P_DEFAULT);
+      dataspace = H5Dget_space(data);
+      if (data < 0) {
+        fprintf(stderr, "failed to open /entry/%s\n", data_name);
+        return -1;
+      }
+      if (H5Sget_simple_extent_ndims(dataspace) != 3) {
+        fprintf(stderr, "Dimension of /entry/%s is not 3!\n", data_name);
+        return -1;    
+      }
 
-    // Get the frame
-    H5Sget_simple_extent_dims(dataspace, dims, NULL);
-    hsize_t offset_in[3] = {frame_in_block, 0, 0};
-    hsize_t offset_out[3] = {0, 0, 0};
-    hsize_t count[3] = {1, ypixels, xpixels};
-    hid_t memspace = H5Screate_simple(3, dims, NULL);   
-    if (memspace < 0) {
-      fprintf(stderr, "failed to create memspace\n");
-      return -1;
-    }
+      // Get the frame
+      H5Sget_simple_extent_dims(dataspace, dims, NULL);
+      hsize_t offset_in[3] = {frame_in_block, 0, 0};
+      hsize_t offset_out[3] = {0, 0, 0};
+      hsize_t count[3] = {1, ypixels, xpixels};
+      hid_t memspace = H5Screate_simple(3, dims, NULL);   
+      if (memspace < 0) {
+        fprintf(stderr, "failed to create memspace\n");
+        return -1;
+      }
 
-    ret = H5Sselect_hyperslab(dataspace, H5S_SELECT_SET, offset_in, NULL, 
-			      count, NULL);
-    if (ret < 0) {
-      fprintf(stderr, "select_hyperslab for file failed\n");
-      return -1;
+      ret = H5Sselect_hyperslab(dataspace, H5S_SELECT_SET, offset_in, NULL, 
+  			      count, NULL);
+      if (ret < 0) {
+        fprintf(stderr, "select_hyperslab for file failed\n");
+        return -1;
+      }
+      ret = H5Sselect_hyperslab(memspace, H5S_SELECT_SET, offset_out, NULL, 
+  			      count, NULL);
+      if (ret < 0) {
+        fprintf(stderr, "select_hyperslab for memory failed\n");
+        return -1;
+      }
+      ret = H5Dread(data, H5T_NATIVE_UINT, memspace, dataspace, H5P_DEFAULT, buf);
+      if (ret < 0) {
+        fprintf(stderr, "H5Dread for image failed. Wrong frame number?\n");
+        return -1;
+      }
+      
+      int i;
+      for (i = 0; i < xpixels * ypixels; i++) {
+        if ((pixel_mask[0] != -9999 && pixel_mask[i] == 1) || // the pixel mask is available
+        (pixel_mask[0] == -9999 && buf[i] == error_val)) { // not available
+         buf_signed[i] = -1;
+        } else if (pixel_mask[0] != -9999 && pixel_mask[i] > 1) { // the pixel mask is 2, 4, 8, 16
+         buf_signed[i] = -2;
+        } else {
+         buf_signed[i] = buf_signed[i] + buf[i];
+        }
+        }
+      H5Sclose(dataspace);
+      H5Sclose(memspace);
+      H5Dclose(data);
+      free(buf);
     }
-    ret = H5Sselect_hyperslab(memspace, H5S_SELECT_SET, offset_out, NULL, 
-			      count, NULL);
-    if (ret < 0) {
-      fprintf(stderr, "select_hyperslab for memory failed\n");
-      return -1;
-    }
-    ret = H5Dread(data, H5T_NATIVE_UINT, memspace, dataspace, H5P_DEFAULT, buf);
-    if (ret < 0) {
-      fprintf(stderr, "H5Dread for image failed. Wrong frame number?\n");
-      return -1;
-    }
-    H5Sclose(dataspace);
-    H5Sclose(memspace);
-    H5Dclose(data);
-
+    
     /////////////////////////////////////////////////////////////////
     // Reading done. Here output starts...
 
@@ -422,17 +413,9 @@ int main(int argc, char **argv) {
     // put the image
     cbf_new_category(cbf, "array_data");
     cbf_new_column(cbf, "data");
-    int i;
-    for (i = 0; i < xpixels * ypixels; i++) {
-      if ((pixel_mask[0] != -9999 && pixel_mask[i] == 1) || // the pixel mask is available
-	  (pixel_mask[0] == -9999 && buf[i] == error_val)) { // not available
-	buf_signed[i] = -1;
-      } else if (pixel_mask[0] != -9999 && pixel_mask[i] > 1) { // the pixel mask is 2, 4, 8, 16
-	buf_signed[i] = -2;
-      } else {
-	buf_signed[i] = buf[i];
-      }
-    }
+    
+    element_size = depth / 8;
+
     cbf_set_integerarray_wdims_fs(cbf,
 				  CBF_BYTE_OFFSET,
 				  1, // binary id
@@ -449,13 +432,12 @@ int main(int argc, char **argv) {
     cbf_write_file(cbf, fh, 1, CBF, MSG_DIGEST | MIME_HEADERS | PAD_4K, 0);
     // no need to fclose() here as the 3rd argument "readable" is 1
     cbf_free_handle(cbf);
+   
+  free(buf_signed);
   }
-
   H5Gclose(group);
   H5Fclose(hdf);
-
-  free(buf);
-  free(buf_signed);
+  
   free(angles);
 
   fprintf(stderr, "\nAll done!\n");
