@@ -275,7 +275,7 @@ int main(int argc, char **argv) {
   int inner_to;
   
   for (frame = from; frame <= to; frame = frame + slice) {
-    fprintf(stderr, "Converting frame %d (%d / %d)\n", frame, frame - from + 1, to - from + 1);
+    fprintf(stderr, "Converting frame %d-%d (%d-%d / %d)\n", frame, frame+slice , frame - from + 1, frame - from + 1 + slice , to - from + 1);
     if (angles[0] != -9999) {
       osc_start = angles[frame - 1];
       fprintf(stderr, " /entry/sample/goniometer/omega[%d] = %.3f (1-indexed)\n", frame, osc_start);
@@ -394,7 +394,7 @@ int main(int argc, char **argv) {
 	fh = fopen(argv[3], "wb");
       } else {
 	char filename[4096];
-	snprintf(filename, 4096, "%s%06d.cbf", argv[3], frame);
+	snprintf(filename, 4096, "%s%06d.cbf", argv[3], (frame-1)/slice + 1 );
 	fh = fopen(filename, "wb");
       }
     }
@@ -432,8 +432,7 @@ int main(int argc, char **argv) {
     cbf_write_file(cbf, fh, 1, CBF, MSG_DIGEST | MIME_HEADERS | PAD_4K, 0);
     // no need to fclose() here as the 3rd argument "readable" is 1
     cbf_free_handle(cbf);
-   
-  free(buf_signed);
+    free(buf_signed);
   }
   H5Gclose(group);
   H5Fclose(hdf);
