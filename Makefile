@@ -1,11 +1,10 @@
 # This Makefile was contributed by Harry Powell (MRC-LMB)
 
-CBFLIB=/lmb/home/harry/CBFlib/CBFlib-0.9.5/lib
-CBFINC=/lmb/home/harry/CBFlib/CBFlib-0.9.5/include
-HDF5LIB=/lmb/home/harry/CBFlib/CBFlib-0.9.5/lib
-CC=/opt/mingw/bin/i386-mingw32msvc-gcc
+CBFLIB=/usr/lib/x86_64-linux-gnu
+CBFINC=/usr/include/cbf
+HDF5LIB=/usr/lib/x86_64-linux-gnu
 CC=/usr/bin/gcc -O3
-# CC=/opt/intel/composer_xe_2015.0.090/bin/intel64/icc -O3
+
 all:	
 	${CC} -std=c99 -o eiger2cbf -g \
 	-I${CBFINC} \
